@@ -1,0 +1,132 @@
+class StayBooking(models.Model):
+    _name = 'stay.guest.booking'
+    _description = 'Guest Booking'
+    _inherit = ['mail.thread']
+    _order = 'name desc,id desc'
+
+@api.depends('booking_guest_details_ids')
+    def _compute_ishangam_status(self):
+        for record in self:
+            new_status_ids = []
+            for guest_detail in record.booking_guest_details_ids:
+                ishangum_status = self.env['ishangam.status'].search([
+                    ('detail_id', '=', guest_detail.id),
+                    ('guest_id', '=', guest_detail.guest_id.id),
+                ])
+                if not ishangum_status:
+                    ishangum_status = self.env['ishangam.status'].create({
+                        'booking_id': record.id,  
+                        'guest_id': guest_detail.guest_id.id,
+                        'detail_id': guest_detail.id,
+                    })
+
+                new_status_ids.append(ishangum_status.id)
+
+            record.ishangam_status_ids = [(6, 0, new_status_ids)]
+
+
+class IshangamStatus(models.Model):
+    _name = 'ishangam.status'
+    _description = 'Ishangam Status'
+
+    booking_id = fields.Many2one('stay.guest.booking', string='Guest Booking', ondelete='cascade')
+    detail_id = fields.Many2one('stay.guest.details', string='Guest Detail', ondelete='cascade')
+    guest_for = fields.Many2one('stay.resident',"Guest For")
+    guest_id = fields.Many2one('stay.registered.guest', string='Guest', required=True, store=True,domain="[('my_resident_ids', '=', guest_for)]")
+    is_star_marked = fields.Char('Is Star Marked?')
+    star_mark_color = fields.Char('Star Mark Color')
+    severity = fields.Char('Severity')
+    booking_guest_details_ids = fields.One2many('stay.guest.details', 'booking_id', string='Guest Booking Details',
+                                                track_visibility='onchange', ondelete='cascade')
+    
+
+
+    def star_mark_check(self):
+        token_url = hp_config['HP_STARMARKED_TOKEN_URL']
+        test_api_url = hp_config['HP_STARMARKED_API_URL'] 
+      
+        starmark_access_key = self.env["ir.config_parameter"].sudo().get_param("isha_hr.hr_star_mark_api")
+
+        api_call_headers = {'Authorization': 'Bearer ' + starmark_access_key}
+        
+        input = {
+            "params": {
+                "name": self.guest_id.guest_name,
+                "phone": self.guest_id.mobile,
+                "email": self.guest_id.email,
+                "lenient_search": True}
+        }
+        try:
+            api_call_response = requests.post(test_api_url, json=input, headers=api_call_headers)  
+            
+            api_call_response_json = json.loads(api_call_response.text)
+
+            if '401 UNAUTHORIZED' in api_call_response.text:
+                client_id = hp_config['HP_STARMARKED_CLIENT_ID']
+                client_secret = hp_config['HP_STARMARKED_CLIENT_SECRET']
+            
+                data = {'grant_type': 'client_credentials'}
+                access_token_response = requests.post(token_url, data=data, verify=False, allow_redirects=False,
+                                                      auth=(client_id, client_secret))
+             
+                tokens = json.loads(access_token_response.text)
+                api_call_headers = {'Authorization': 'Bearer ' + tokens['access_token']}
+                input = {
+                    "params": {
+                        "name": self.guest_id.guest_name,
+                        "phone": self.guest_id.mobile,
+                        "email": self.guest_id.email,
+                        "lenient_search": True}
+                }
+
+                api_call_response = requests.post(test_api_url, json=input, headers=api_call_headers, verify=False)
+                api_call_response_json = json.loads(api_call_response.text)
+                self.env["ir.config_parameter"].sudo().set_param("isha_hr.hr_star_mark_api", tokens['access_token'])
+
+            if api_call_response_json['result']:
+                self.write({'is_star_marked': 'NO',
+                            'star_mark_color': '',
+                            'severity': ''})
+                for result in api_call_response_json['result']:
+                    if result['isStarMarked']:
+                        self.write({'is_star_marked': 'YES',
+                                    'star_mark_color': result['color'],
+                                    'severity': result['severity']})
+                        if result['dnaInfo']:
+                            self.env['hr.applicant_star_marked'].sudo().search([('applicant_id', '=', self.id)]).unlink()
+                            for dnaInfo in result['dnaInfo']:
+                                value1 = dnaInfo['values'][0] if len(dnaInfo['values']) > 0 else None
+                                value2 = dnaInfo['values'][1] if len(dnaInfo['values']) > 1 else None
+                                value3 = dnaInfo['values'][2] if len(dnaInfo['values']) > 2 else None
+                                value4 = dnaInfo['values'][3] if len(dnaInfo['values']) > 3 else None
+                                value5 = dnaInfo['values'][4] if len(dnaInfo['values']) > 4 else None
+                                self.env['hr.applicant_star_marked'].sudo().create({'applicant_id': self.id,
+                                                                            'category_name': dnaInfo['categoryName'],
+                                                                             'value1': value1,
+                                                                             'value2': value2,
+                                                                             'value3': value3,
+                                                                             'value4': value4,
+                                                                             'value5': value5,
+                                                                             'remarks': dnaInfo['remarks']})
+            else:
+                self.env['hr.applicant_star_marked'].sudo().search([('applicant_id', '=', self.id)]).unlink()
+                self.write({'is_star_marked': 'NO', 'star_mark_color': '', 'severity': ''})
+        except Exception as e:
+            logging.exception('Starmark Check Exception occured.')
+    selectable_fields = ['name', 'partner_name', 'job_id', 'application_id', 'requesting_department_id',
+                         'resource_category', 'connected_status', 'assignment1_status', 'assignment2_status', 'first_interview_status',
+                         'second_interview_status', 'final_interview_status', 'partner_id', 'partner_phone', 'partner_mobile',
+                         'email_from', 'dob', 'gender', 'marital_status', 'nationality', 'address', 'type_id', 'qualification',
+                         'experience', 'functional_areas', 'skill_competencies', 'other_interests', 'categ_ids', 'user_id',
+                         'source_id', 'prescreening_id', 'assignment1_id', 'assignment2_id', 'first_interview_id', 'second_interview_id',
+                         'survey_id', 'is_meditator', 'is_star_marked', 'star_marked_color', 'severity', 'job_location',
+                         'reason_for_change', 'done_isha_program', 'stay_in_ashram', 'any_kind_job', 'duration_with_isha',
+                         'about_us', 'salary_expected', 'salary_proposed', 'notice_period', 'availability', 'joining_formalities_id',
+                         'template_id_2', 'employee_id', 'links_of_interest', 'upload_cv_resume', 'offer_letter', 'offer_acceptance',
+                         'portal_applicant_comments', 'passport_photo', 'identity_proof', 'address_proof', 'degree_certificate',
+                         'experience_certificate', 'relieving_order', 'last_drawn_salary', 'bank_account_proof',
+                         'stage_id','active','create_uid','create_date','write_uid','write_date','first_interview_response_state',
+                         'second_interview_response_state','survey_response_state','prescreening_date','connected_date',
+                         'first_interview_date','last_interview_date','offer_issued_date','offer_accepted_date','offer_declined_date',
+                         'onboarded_date','decline_reason_date','languages','hp_starmarked','hp_meditator','sp_completed','employee_id',
+                         'is_source_validated']
